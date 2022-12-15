@@ -16,16 +16,16 @@ differentiated="Y"
 
 
 # Set paths
-working_dir="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Organoids_Scripts/R_outputs/"
+working_dir=".../R_outputs/"
 
-countmatrix_path_batch1="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Organoids_Scripts/1stBatch_cluster_outputs/feature_counts_June21"
-countmatrix_path_batch2="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Organoids_Scripts/2ndBatch_cluster_outputs/feature_counts_March22"
-countmatrix_path_batch3="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Organoids_Scripts/3rdBatch_cluster_outputs/feature_counts_July22"
-countmatrix_path_batch4="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Organoids_Scripts/4thBatch_cluster_outputs/feature_counts_Nov22"
+countmatrix_path_batch1=".../1stBatch_cluster_outputs/feature_counts_June21"
+countmatrix_path_batch2=".../2ndBatch_cluster_outputs/feature_counts_March22"
+countmatrix_path_batch3=".../3rdBatch_cluster_outputs/feature_counts_July22"
+countmatrix_path_batch4=".../4thBatch_cluster_outputs/feature_counts_Nov22"
 
-pjsamples_dir="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Write-up/Figures/"
+pjsamples_dir=".../Input_Data"
 
-GSEA_pathways_path="/Users/max/OneDrive - University College London/RNA-seq project/RNAseq analysis Pipeline/Scripts/scRNAseq/R_scripts/Input_Data/GMT_pathways/"
+GSEA_pathways_path=".../Input_Data/GMT_pathways/"
 
 # Create quality_controls directory
 output_dir=paste0(working_dir, "quality_controls")
