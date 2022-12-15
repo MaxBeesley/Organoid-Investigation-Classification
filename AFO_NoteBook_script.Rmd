@@ -1,0 +1,1400 @@
+---
+Organoids Bulk RNAseq Analysis Pipeline
+
+Written by Max Arran Beesley 2022
+---
+
+#### Load packages and set paths
+
+```{r}
+
+## Should analysis include CDH? (Y or N)
+CDH="Y"
+
+## Should analysis include differentiated? (Y or N)
+differentiated="Y"
+
+
+# Set paths
+working_dir="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Organoids_Scripts/R_outputs/"
+
+countmatrix_path_batch1="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Organoids_Scripts/1stBatch_cluster_outputs/feature_counts_June21"
+countmatrix_path_batch2="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Organoids_Scripts/2ndBatch_cluster_outputs/feature_counts_March22"
+countmatrix_path_batch3="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Organoids_Scripts/3rdBatch_cluster_outputs/feature_counts_July22"
+countmatrix_path_batch4="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Organoids_Scripts/4thBatch_cluster_outputs/feature_counts_Nov22"
+
+pjsamples_dir="/Users/max/OneDrive - University College London/Organoids_Typing_Project/Write-up/Figures/"
+
+GSEA_pathways_path="/Users/max/OneDrive - University College London/RNA-seq project/RNAseq analysis Pipeline/Scripts/scRNAseq/R_scripts/Input_Data/GMT_pathways/"
+
+# Create quality_controls directory
+output_dir=paste0(working_dir, "quality_controls")
+suppressWarnings(dir.create(output_dir))
+print(paste0("Output directory= ", output_dir))
+
+
+# Load packages
+library("ggplot2")
+library("ggrepel")
+library("edgeR")
+library("pheatmap")
+library("reshape2")
+library("RColorBrewer")
+library("viridis")
+library('biomaRt')
+library("DESeq2")
+library("sva")
+library("tidyselect")
+library("fgsea")
+
+```
+
+#### Merge count matrices
+
+```{r}
+
+# Generate import function
+multi_join=function(list_of_loaded_data, join_func, ...){
+  require("dplyr")
+  output <- Reduce(function(x, y) {join_func(x, y, ...)}, list_of_loaded_data)
+  return(output)
+}
+
+## Batch 1
+setwd(countmatrix_path_batch1)
+all_counts=list.files(".", pattern=".txt")       # Make a list of all .txt files
+all_counts=all_counts[!grepl("summary",all_counts)] # Delete summary.txt rows
+all_counts=all_counts[!grepl("Gene_list.txt",all_counts)] # Delete header
+print(all_counts)
+
+# Organise and name each sample after the counts name but removing '_R1_001_counts.txt'
+df=lapply(all_counts, read.table, skip=1, header=T) # Skip first line, take new first line as header values
+for(i in 1:length(df)){               # For each individual count matrix...
+  df[[i]]=df[[i]][,c(1,7)]
+# Rename headers & remove excess text from name in 2parts
+  colnames(df[[i]])=c("Geneid", gsub("_R1_001_counts.txt","", all_counts[i]))
+}
+complete_matrix_1=multi_join(df, full_join)   # Combine all count matrices
+
+## Batch 2
+setwd(countmatrix_path_batch2)
+all_counts=list.files(".", pattern=".txt")       # Make a list of all .txt files
+all_counts=all_counts[!grepl("summary",all_counts)] # Delete summary.txt rows
+all_counts=all_counts[!grepl("Gene_list.txt",all_counts)] # Delete header
+print(all_counts)
+df=lapply(all_counts, read.table, skip=1, header=T) 
+for(i in 1:length(df)){               
+  df[[i]]=df[[i]][,c(1,7)]
+  colnames(df[[i]])=c("Geneid", gsub("_R1_001_counts.txt","", all_counts[i]))
+}
+complete_matrix_2=multi_join(df, full_join)   # Combine all count matrices
+
+# Rename control samples to organoid_line and GA
+colnames <- colnames(complete_matrix_2)
+colnames <- gsub("K_S3","K16w", colnames)
+colnames <- gsub("T_S2","L11w", colnames)
+colnames <- gsub("L_S1","L16w", colnames)
+colnames <- gsub("U_S5","S13w", colnames)
+colnames <- gsub("I_S6","S20w", colnames)
+colnames <- gsub("M_S7","S22w", colnames)
+colnames <- gsub("SI_S4","SI13w", colnames)
+colnames(complete_matrix_2) <- colnames
+
+## Batch 3
+setwd(countmatrix_path_batch3)
+all_counts=list.files(".", pattern=".txt")       # Make a list of all .txt files
+all_counts=all_counts[!grepl("summary",all_counts)] # Delete summary.txt rows
+all_counts=all_counts[!grepl("Gene_list.txt",all_counts)] # Delete header
+print(all_counts)
+df=lapply(all_counts, read.table, skip=1, header=T) 
+for(i in 1:length(df)){               
+  df[[i]]=df[[i]][,c(1,7)]
+  colnames(df[[i]])=c("Geneid", gsub("_R1_001_counts.txt","", all_counts[i]))
+}
+complete_matrix_3=multi_join(df, full_join)   # Combine all count matrices
+colnames(complete_matrix_3) <- gsub("sample_", "", colnames(complete_matrix_3))
+
+## Batch 4
+setwd(countmatrix_path_batch4)
+all_counts=list.files(".", pattern=".txt")       # Make a list of all .txt files
+all_counts=all_counts[!grepl("summary",all_counts)] # Delete summary.txt rows
+all_counts=all_counts[!grepl("Gene_list.txt",all_counts)] # Delete header
+print(all_counts)
+df=lapply(all_counts, read.table, skip=1, header=T) 
+for(i in 1:length(df)){               
+  df[[i]]=df[[i]][,c(1,7)]
+  colnames(df[[i]])=c("Geneid", gsub("_R1_001_counts.txt","", all_counts[i]))
+}
+complete_matrix_4=multi_join(df, full_join)   # Combine all count matrices
+colnames(complete_matrix_4) <- gsub("sample_", "", colnames(complete_matrix_4))
+
+# Merge different batch matrices
+complete_matrix <- merge(complete_matrix_1, complete_matrix_2, by="Geneid", all = FALSE)
+complete_matrix <- merge(complete_matrix, complete_matrix_3, by="Geneid", all = FALSE)
+complete_matrix <- merge(complete_matrix, complete_matrix_4, by="Geneid", all = FALSE)
+complete_matrix[is.na(complete_matrix)] = 0
+colnames(complete_matrix) <- gsub("_.*","",colnames(complete_matrix)) # Neaten colnames
+colnames(complete_matrix)[1] <- "ensembl_gene_id"
+
+# Download biomaRt gene lists to convert between ensembl_gene_id and hgnc_symbol
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+genes <- complete_matrix$ensembl_gene_id
+Gene_list <- getBM(filters= "ensembl_gene_id", attributes= c("ensembl_gene_id",
+"entrezgene_id", "hgnc_symbol"),values=genes,mart=mart)
+print("Internet Gene list downloaded")
+
+setwd(working_dir)
+write.table(Gene_list, file = "Gene_list.txt", sep = "\t",
+             row.names = FALSE, col.names = TRUE)
+
+
+# Rename control samples to organoid_line and GA
+colnames(complete_matrix) <- gsub("4D5","SI18w", colnames(complete_matrix))
+colnames(complete_matrix) <- gsub("4D6","SI23w", colnames(complete_matrix))
+colnames(complete_matrix) <- gsub("4C12","K22wB", colnames(complete_matrix))
+# Rename samples that excel will confuse for 4x10^1
+colnames(complete_matrix) <- gsub("4E1","4Eone", colnames(complete_matrix))
+colnames(complete_matrix) <- gsub("4E2","4Etwo", colnames(complete_matrix))
+
+
+# Combine Matrix & GeneIDs for export 
+samples <- colnames(complete_matrix)[2:length(colnames(complete_matrix))]
+Gene_list_noDuplicates <- Gene_list[!duplicated(Gene_list$ensembl_gene_id),]
+complete_matrix <- merge(complete_matrix,Gene_list_noDuplicates,by="ensembl_gene_id")
+complete_matrix_GeneSymbol <- complete_matrix[, c("hgnc_symbol",samples)]
+complete_matrix_Ensembl <- complete_matrix[, c("ensembl_gene_id",samples)]
+
+# Save raw and cpm matrix with GeneSymbols
+setwd(working_dir)
+write.csv(complete_matrix_GeneSymbol, file = "complete_matrix_GeneSymbol.csv")
+
+cpm_matrix_GeneSymbol <- complete_matrix_GeneSymbol[,c(2:length(colnames(complete_matrix_GeneSymbol)))]
+cpm_matrix_GeneSymbol <- cpm(cpm_matrix_GeneSymbol)
+cpm_matrix_GeneSymbol <- as.data.frame(cpm_matrix_GeneSymbol)
+cpm_matrix_GeneSymbol$hgnc_symbol <-  complete_matrix_GeneSymbol$hgnc_symbol       
+setwd(working_dir)
+write.csv(cpm_matrix_GeneSymbol, file = "cpm_matrix_GeneSymbol.csv")
+
+
+# Proceed with the Ensembl matrix
+    complete_matrix <- complete_matrix_Ensembl
+
+rownames(complete_matrix) <- complete_matrix[,1]
+complete_matrix <- complete_matrix[,-1]
+
+```
+
+#### Load sample data
+
+```{r}
+
+setwd(pjsamples_dir)
+pjsamples=read.csv("Organoids_extended_metadata.csv")
+pjsamples$batch=factor(pjsamples$batch, levels=c("1", "2", "3", "4")) # 4 batches
+
+complete_matrix <- complete_matrix[,pjsamples$organoid_line]
+
+```
+
+### Remove non-expressed genes & normalize data to Counts per Million (CPM) 
+
+```{r}
+setwd(working_dir)
+
+# Remove any genes with no expression (sum of CPM = 0)
+complete_matrix=complete_matrix[rowSums(cpm(complete_matrix)>=1)!=0,] 
+
+print(paste0(nrow(complete_matrix), " genes have at least 1 CPM in at least 1 sample"))
+
+## Produce CPM matrix
+cpm_complete <- cpm(complete_matrix)
+
+```
+
+#### Normalisation QC - Plot Raw vs Normalised counts
+
+```{r}
+
+pdf(paste0(output_dir, "/QCboxplots_rawVSnormalised_data.pdf"), height=8, width=12)
+
+  melt=melt(complete_matrix, id.vars=0)
+  merge=merge(melt, pjsamples, by.x="variable", by.y="organoid_line")
+  
+  print(ggplot(merge, aes(x=variable, y=value, fill=variable))+
+    geom_boxplot(color="black", alpha=.7, outlier.shape = 21) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text.x = element_text(angle=90, hjust=.95, vjust=.5)) +
+    coord_cartesian(ylim=c(0,300000)) +
+    theme(text=element_text(family="sans"))
+  )
+    
+  rm(melt, merge)
+  
+  melt=melt(cpm_complete, id.vars=0)
+  merge=merge(melt, pjsamples, by.x="Var2", by.y="organoid_line")
+  
+  print(ggplot(merge, aes(x=Var2, y=value, fill=Var2)) +
+    geom_boxplot(color="black", alpha=.7, outlier.shape = 21) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text.x = element_text(angle=90, hjust=.95, vjust=.5)) +
+    coord_cartesian(ylim=c(0,300000)) +
+    theme(text=element_text(family="sans"))
+  )
+  
+dev.off()
+
+```
+
+#### Initial quality assessment of all samples through PCA and HCL
+
+```{r}
+
+# Calculate PCA
+pca=prcomp(t(log2(cpm_complete+1)))
+percentVar=pca$sdev^2/sum(pca$sdev^2)
+d=data.frame(PC1=pca$x[,1], PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4], pjsamples, names=colnames(cpm_complete))
+attr(d, "percentVar")=percentVar
+
+# Extract colours from the viridis rainbow colours scale package
+colour_plot <- ggplot(d, aes(x = PC1, y = PC2, fill=(factor(batch)))) +
+    scale_color_viridis(option="turbo", discrete=TRUE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+
+pdf(paste0(output_dir, "/pca_initial.pdf"), height=6, width=10)
+basic_pca_list=lapply(1:3, function(x){    
+
+plot <- ggplot() +
+  geom_point(data=d, 
+             aes(x=d[,x], y=d[,(x+1)], fill=d$batch, shape=d$batch),
+             colour="black", alpha=.7,size=3) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.text = element_text(size=10)) +
+  xlab(paste0("PC1: ", round(attr(d, "percentVar")[1] *100), "% variance")) +
+  ylab(paste0("PC", 1+x, ": ", round(attr(d, "percentVar")[1+x] *100), "% variance")) +
+  scale_shape_manual(values = c(22:25), name="Batch") +
+  guides(fill = "none", colour = guide_legend(override.aes=list(size=7))) +
+  theme(text=element_text(family="sans"))
+
+print(plot)
+})
+dev.off()
+
+## HCL heatmap
+sampleDists <- cor(log2(cpm_complete+1))
+sampleDistMatrix <- as.matrix(sampleDists)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+pdf(paste0(output_dir, "/heatmap_initial.pdf"), height=10, width=10)
+pheatmap(sampleDistMatrix, show_colnames = F, fontsize=8, legend=FALSE) +
+  theme(text=element_text(family="sans"))
+dev.off()
+
+```
+
+#### Filter outliers only
+
+```{r}
+
+complete_matrix_outlier=complete_matrix
+pjsamples_outlier=pjsamples
+
+## Remove unknown - Comment out if want to keep
+samples_to_remove <- c("H1", "33", "42")
+lapply(1:length(samples_to_remove), function(h){
+pjsamples_outlier<<-pjsamples_outlier[pjsamples_outlier$organoid_line!=samples_to_remove[h],]
+})
+
+complete_matrix_outlier <- complete_matrix_outlier[,pjsamples_outlier$organoid_line]
+
+# Modify C measure of gestation (6) into equivilant GA
+colnames(complete_matrix_outlier) <- gsub("SI-C6", "SI10w", colnames(complete_matrix_outlier))
+pjsamples_outlier$organoid_line <- gsub("SI-C6", "SI10w", pjsamples_outlier$organoid_line)
+pjsamples_outlier$organoid_line <- gsub("SI-C6", "SI10w", pjsamples_outlier$organoid_line)
+
+## Remove empty rows from PJsamples
+rownames(pjsamples_outlier) <- pjsamples_outlier$organoid_line
+pjsamples_outlier_nacheck=complete.cases(pjsamples_outlier)  # Check for NAs
+pjsamples_outlier[pjsamples_outlier_nacheck,]                # Remove NAs
+
+# Re-generate matrix
+cpm_outlier_removed <- cpm(complete_matrix_outlier)
+samples <- pjsamples_outlier$organoid_line
+
+```
+
+#### QC post-filtering - repeat PCA and heatmap
+
+```{r}
+
+# Re-calculate PCA
+pca=prcomp(t(log2(cpm_outlier_removed+1)))
+percentVar=pca$sdev^2/sum(pca$sdev^2)
+d=data.frame(PC1=pca$x[,1], PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4], pjsamples_outlier, names=colnames(cpm_outlier_removed))
+attr(d, "percentVar")=percentVar
+
+# Extract colours from the viridis rainbow colours scale package
+colour_plot <- ggplot(d, aes(x = PC1, y = PC2, fill=(factor(batch)))) +
+    scale_color_viridis(option="turbo", discrete=TRUE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+
+pdf(paste0(output_dir, "/pca_post_filtering.pdf"), height=6, width=10)
+basic_pca_list=lapply(1:3, function(x){    
+
+plot <- ggplot() +
+  geom_point(data=d, 
+             aes(x=d[,x], y=d[,(x+1)], fill=factor(batch), shape=factor(batch)),
+             colour="black", alpha=.7,size=3) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.text = element_text(size=10)) +
+  xlab(paste0("PC1: ", round(attr(d, "percentVar")[1] *100), "% variance")) +
+  ylab(paste0("PC", 1+x, ": ", round(attr(d, "percentVar")[1+x] *100), "% variance")) +
+  scale_shape_manual(values = c(22:25), name="Batch") +
+  guides(fill = "none", colour = guide_legend(override.aes=list(size=7))) +
+  theme(text=element_text(family="sans"))
+
+print(plot)
+})
+dev.off()
+
+## HCL heatmap
+sampleDists <- cor(log2(cpm_outlier_removed+1))
+sampleDistMatrix <- as.matrix(sampleDists)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+pdf(paste0(output_dir, "/heatmap_post_filtering.pdf"), height=10, width=10)
+pheatmap(sampleDistMatrix, show_colnames = F, fontsize=8, legend=FALSE) +
+  theme(text=element_text(family="sans"))
+dev.off()
+
+```
+
+#### Batch correction 
+
+```{r}
+
+# Filter pjsamples to be equivilant to the matrix
+pjsamples_outlier <- pjsamples_outlier[!is.na(pjsamples_outlier$organoid_line),]
+pjsamples_outlier$batch <- as.integer(pjsamples_outlier$batch)
+rownames(pjsamples_outlier) <- pjsamples_outlier$organoid_line
+pjsamples_outlier <- pjsamples_outlier[colnames(complete_matrix_outlier),]
+
+# Run batch correction using ComBat_seq
+complete_matrix_outlier_batch_adjusted <- ComBat_seq(as.matrix(complete_matrix_outlier),
+                                                     batch=as.factor(pjsamples_outlier$batch))
+
+# Update matrix with batch corrected data
+cpm_batch_correction=cpm(complete_matrix_outlier_batch_adjusted)
+
+```
+
+#### QC post-batch correction
+
+```{r}
+
+# Re-calculate PCA
+pca=prcomp(t(log2(cpm_batch_correction+1)))
+percentVar=pca$sdev^2/sum(pca$sdev^2)
+d=data.frame(PC1=pca$x[,1], PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4], pjsamples_outlier, names=colnames(cpm_batch_correction))
+attr(d, "percentVar")=percentVar
+
+# Extract colours from the viridis rainbow colours scale package
+colour_plot <- ggplot(d, aes(x = PC1, y = PC2, fill=(factor(batch)))) +
+    scale_color_viridis(option="turbo", discrete=TRUE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+
+pdf(paste0(output_dir, "/pca_post_BatchCorrection.pdf"), height=6, width=10)
+basic_pca_list=lapply(1:3, function(x){    
+
+# PCA, coloured for batch
+plot <- ggplot() +
+  geom_point(data=d, 
+             aes(x=d[,x], y=d[,(x+1)], fill=as.character(d$batch), shape=as.character(d$batch)),
+             colour="black", alpha=.7,size=3) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.text = element_text(size=10)) +
+  xlab(paste0("PC1: ", round(attr(d, "percentVar")[1] *100), "% variance")) +
+  ylab(paste0("PC", 1+x, ": ", round(attr(d, "percentVar")[1+x] *100), "% variance")) +
+  scale_shape_manual(values = c(22:25), name="Batch") +
+  guides(fill = "none", colour = guide_legend(override.aes=list(size=7))) +
+  theme(text=element_text(family="sans"))
+
+print(plot)
+
+})
+dev.off()
+
+## HCL heatmap
+sampleDists <- cor(log2(cpm_batch_correction+1))
+sampleDistMatrix <- as.matrix(sampleDists)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+pdf(paste0(output_dir, "/heatmap_post_BatchCorrection.pdf"), height=10, width=10)
+pheatmap(sampleDistMatrix, show_colnames = F, fontsize=8, legend=FALSE) +
+  theme(text=element_text(family="sans"))
+dev.off()
+
+```
+
+#### Remove samples of choice
+
+```{r}
+
+if (differentiated=="N"){
+## Remove differentiated Batch1-3 - Comment out if want to keep
+samples_to_remove <- c("B6", "C7", "D7", "E7", "F7", "G7", "H7", "A6")
+lapply(1:length(samples_to_remove), function(h){
+pjsamples_outlier<<-pjsamples_outlier[pjsamples_outlier$organoid_line!=samples_to_remove[h],]
+})
+
+## Remove differentiated Batch4 - Comment out if want to keep
+samples_to_remove <- c("4C8", "4C7", "4C4", "4C3", "4C2", "4C11", "4B9", "4B8", "4B11", "4B10", "4C1", "4B12")
+lapply(1:length(samples_to_remove), function(h){
+pjsamples_outlier<<-pjsamples_outlier[pjsamples_outlier$organoid_line!=samples_to_remove[h],]
+})
+}
+
+if (CDH=="N"){
+## Remove CDH - Comment out if want to keep
+pjsamples_outlier <- pjsamples_outlier[pjsamples_outlier$condition!="CDH",]
+
+## Remove TF - Comment out if want to keep
+pjsamples_outlier <- pjsamples_outlier[pjsamples_outlier$condition!="Tracheal Fluid-derived Organoids
+",]
+}
+
+# Proceed with altered matrix
+cpm_batch_correction <- cpm_batch_correction[,pjsamples_outlier$organoid_line]
+
+```
+
+#### Labelled PCA
+
+```{r}
+
+# Re-calculate PCA
+pca=prcomp(t(log2(cpm_batch_correction+1)))
+percentVar=pca$sdev^2/sum(pca$sdev^2)
+PCA_data=data.frame(PC1=pca$x[,1], PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4], pjsamples_outlier, names=colnames(cpm_batch_correction))
+attr(PCA_data, "percentVar")=percentVar
+
+# Extract colours from the viridis rainbow colours scale package
+colour_plot <- ggplot(PCA_data, aes(x = PC1, y = PC2, fill=(factor(batch)))) +
+    scale_color_viridis(option="turbo", discrete=TRUE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+
+# Generate matrix of samples which need to be labelled on the PCA
+labels <- PCA_data[,c("PC1", "PC2", "PC3", "PC4", "organoid_line")]
+rownames(labels) <- labels$organoid_line
+labels <- labels[pjsamples_outlier[pjsamples_outlier$derivation=="Fetal Tissue-derived Control Organoids","organoid_line"],]
+labels <- labels[!is.na(labels$organoid_line),]
+
+pdf(paste0(output_dir, "/pca_post_BatchCorrection_partial_labelled.pdf"), height=6, width=10)
+basic_pca_list=lapply(1:3, function(x){ # Run for PC's 1-4
+
+plot <- ggplot() +
+  geom_point(data=PCA_data, 
+             aes(x=PCA_data[,x], y=PCA_data[,(x+1)], fill=as.character(PCA_data$batch), shape=as.character(PCA_data$batch)),
+             colour="black", alpha=.7,size=3) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.text = element_text(size=10)) +
+  xlab(paste0("PC1: ", round(attr(PCA_data, "percentVar")[1] *100), "% variance")) +
+  ylab(paste0("PC", 1+x, ": ", round(attr(PCA_data, "percentVar")[1+x] *100), "% variance")) +
+  scale_shape_manual(values = c(22:25), name="Batch") +
+  guides(fill = "none", colour = "none", shape=guide_legend(override.aes=list(size=7, color="black", fill=c("coral", "cyan3"))) +
+  theme(text=element_text(family="sans"))
+         ) +
+  geom_label(
+      data = labels,
+      aes(x=labels[,x], y=labels[,(x+1)],
+          label=as.factor(organoid_line),
+          color=as.factor(organoid_line)),
+      fill="grey99",
+      size=3,
+      fontface = "bold",
+      nudge_x = -1,
+      nudge_y = -1,
+      show.legend = FALSE,
+      label.padding = unit(0.1, "lines"),
+      label.size = 0.5,
+    )
+
+print(plot)
+})
+dev.off()
+
+## HCL
+sampleDists <- cor(log2(cpm_batch_correction+1))
+sampleDistMatrix <- t(as.matrix(sampleDists))
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+annotation = as.data.frame(pjsamples_outlier$organoid_tissue_label)
+rownames(annotation) <- colnames(cpm_batch_correction)
+
+pdf(paste0(output_dir, "/heatmap_final.pdf"), height=10, width=10)
+pheatmap(sampleDistMatrix, show_colnames = F, fontsize=8, legend=FALSE) +
+  theme(text=element_text(family="sans"), kmeans_k=3, cutree_cols = 3, annotation_col=annotation, fontsize=25)
+dev.off()
+
+```
+
+#### Identifying samples
+
+```{r}
+
+if (differentiated=="Y"){shapes=c(24,21,22)}
+if (differentiated=="N"){shapes=c(24,21)}
+
+d_labelled <- PCA_data
+
+# Create labels column for the control samples which need to be labelled on the PCA
+d_labelled[(d_labelled$derivation=="Fetal organoid_line-derived Control Organoids"),"labels"] <- d_labelled[(d_labelled$derivation=="Fetal organoid_line-derived Control Organoids"),"organoid_line"]
+
+# PCA, with organ identity label coloured and control samples labelled 
+pdf(paste0(output_dir, "/pca_organ.pdf"), height=6, width=12)
+my_colours = c("cyan3", "gold", "navyblue", "pink")
+
+plot <- ggplot(data=d_labelled, aes(x=PC1, y=PC2, fill=as.character(organoid_tissue_label))) +
+  geom_point(aes(shape=as.character(derivation)),
+             colour="black", alpha=.7,size=3) +
+    geom_point(data=d_labelled[d_labelled$derivation=="Fetal organoid_line-derived Control Organoids",], 
+             aes(x=PC1, y=PC2, fill=as.character(organoid_tissue_label)),
+             shape=21, colour="red", alpha=1,size=3,stroke=1) +
+  theme_light(base_family = "sans",
+    base_line_size = 0.2,
+    base_rect_size = 0.2,
+    base_size=12) +
+  xlab(paste0("PC1: ", round(percentVar[1] *100), "% variance")) +
+  ylab(paste0("PC2: ", round(percentVar[2] *100), "% variance")) +
+  scale_shape_manual(values = shapes, name="Derivation") +
+  scale_fill_manual(values=my_colours, name="Classification") +
+  guides(shape=guide_legend(override.aes=list(size=5)),
+         fill=guide_legend(override.aes=list(size=5, fill=my_colours, shape=24, color="black"))) +
+  geom_label_repel(aes(label=labels),
+             color="black",
+             fontface = "bold",
+             fill="gray98",
+             size = 4,
+             max.overlaps=1000,
+             label.padding = unit(0.15, "lines"),
+             label.r = unit(0.25, "lines"),
+             inherit.aes = TRUE,
+             min.segment.length = 0.1)
+
+print(plot)
+dev.off()
+
+
+# PCA, with organ identity coloured and all samples labelled
+pdf(paste0(output_dir, "/pca_allLabeled.pdf"), height=6, width=10)
+
+colour_plot <- ggplot(d_labelled, aes(x = PC1, y = PC2, colour=as.character(organoid_tissue_label))) +
+    scale_color_viridis(option="turbo", discrete=TRUE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+
+plot <- ggplot() +
+  geom_point(data=d_labelled, 
+             aes(x=PC1, y=PC2, fill=as.character(organoid_tissue_label), shape=as.character(derivation)),
+             colour="black", alpha=.7,size=3) +
+  theme(legend.text = element_text(size=10),
+        text=element_text(family="sans")) +
+  theme_light(base_family = "sans",
+    base_line_size = 0.2,
+    base_rect_size = 0.2) +
+  xlab(paste0("PC1: ", round(percentVar[1] *100), "% variance")) +
+  ylab(paste0("PC2: ", round(percentVar[2] *100), "% variance")) +
+  scale_shape_manual(values = shapes, name="Derivation") +
+  scale_fill_manual(values=my_colours, name="Classification") +
+  guides(shape=guide_legend(override.aes=list(size=7)),
+         fill=guide_legend(override.aes=list(size=7, color=my_colours))) +
+  geom_label(
+      data = d_labelled,
+      aes(x=d_labelled[,"PC1"], y=d_labelled[,"PC2"],
+          label=as.factor(organoid_line)),
+      color="black",
+      fill="grey99",
+      size=3,
+      fontface = "bold",
+      nudge_x = -0,
+      nudge_y = 0,
+      show.legend = FALSE,
+      label.padding = unit(0.1, "lines"),
+      label.size = 0.5)
+
+print(plot)
+dev.off()
+
+
+
+
+# PCA, with organoid condition coloured
+pdf(paste0(output_dir, "/pca_condition.pdf"), height=5, width=8)
+
+colour_plot <- ggplot(d_labelled, aes(x = PC1, y = PC2, colour=condition)) +
+    scale_color_viridis(option="turbo", discrete=TRUE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+
+plot <- ggplot() +
+  geom_point(data=d_labelled, 
+             aes(x=PC1, y=PC2, fill=as.character(condition), shape=as.character(condition)),
+             colour="black", alpha=1,size=3) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.text = element_text(size=10)) +
+  xlab(paste0("PC1: ", round(percentVar[1] *100), "% variance")) +
+  ylab(paste0("PC2: ", round(percentVar[2] *100), "% variance")) +
+  scale_shape_manual(values = c(24,23,22,25), name="Derivation") +
+  scale_fill_manual(values=my_colours, name="Media") +
+  theme(text=element_text(family="sans"))
+print(plot)
+dev.off()
+
+
+# PCA, with organoid GA coloured
+pdf(paste0(output_dir, "/pca_GA.pdf"), height=6, width=10)
+
+d_labelled[d_labelled$GA=="999","GA"] <- NA
+
+colour_plot <- ggplot(d_labelled, aes(x = PC1, y = PC2, colour=GA)) +
+    scale_color_viridis(option="turbo", discrete=FALSE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+
+plot <- ggplot() +
+  geom_point(data=d_labelled, 
+             aes(x=PC1, y=PC2, fill=as.numeric(GA), shape=as.character(derivation)),
+             colour="black", alpha=.7,size=3) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.text = element_text(size=10)) +
+  xlab(paste0("PC1: ", round(percentVar[1] *100), "% variance")) +
+  ylab(paste0("PC2: ", round(percentVar[2] *100), "% variance")) +
+  scale_shape_manual(values = shapes, name="Derivation") +
+  scale_fill_viridis(option = "viridis", name="GA", direction = -1, limits=c(0,40)) +
+  theme(text=element_text(family="sans"))
+print(plot)
+dev.off()
+
+```
+
+# PCA of CDH samples
+
+```{r}
+
+if (CDH=="Y"){
+  
+d_labelled <- PCA_data
+
+# Create labels column for the control samples which need to be labelled on the PCA
+d_labelled[(d_labelled$derivation=="Fetal organoid_line-derived Control Organoids"),"labels"] <- d_labelled[(d_labelled$derivation=="Fetal organoid_line-derived Control Organoids"),"organoid_line"]
+
+d_labelled[d_labelled$condition=="SB","condition"] <- "H" # ignore SB condition for this plot
+
+## Plot PCA, including CDH samples and highlighting them
+pdf(paste0(output_dir, "/pca_CDH_highlighted.pdf"), height=6, width=12)
+my_colours = c("#12642e", "#8bbe27")
+
+d_labelled_CDH <- d_labelled
+d_labelled_CDH[d_labelled_CDH$CDH=="Y","derivation"] <- "CDH"
+
+plot <- ggplot(data=d_labelled_CDH, aes(x=PC1, y=PC2)) +
+  geom_point(data=d_labelled_CDH[d_labelled_CDH$derivation=="Amniotic Fluid-derived Organoids",],
+             colour="black", alpha=.7,size=3,shape=24, fill="gray80") +
+  geom_point(data=d_labelled_CDH[d_labelled_CDH$derivation=="Fetal organoid_line-derived Control Organoids",],
+             aes(x=PC1, y=PC2),
+             shape=21, colour="red", alpha=1,size=3,stroke=1, fill="gray80") +
+   geom_point(data=d_labelled_CDH[d_labelled_CDH$derivation=="CDH",],
+             aes(x=PC1, y=PC2, fill=as.character(condition), shape=as.character(condition)),
+             colour="black", alpha=1,size=3,stroke=1) +
+  theme_light(base_family = "sans",
+    base_line_size = 0.2,
+    base_rect_size = 0.2,
+    base_size=12) +
+  xlab(paste0("PC1: ", round(percentVar[1] *100), "% variance")) +
+  ylab(paste0("PC2: ", round(percentVar[2] *100), "% variance")) +
+  scale_fill_manual(values=my_colours) +
+  scale_shape_manual(values = c(22,23)) +
+  geom_label_repel(aes(label=labels),
+             color="black",
+             fontface = "bold",
+             fill="gray98",
+             size = 4,
+             max.overlaps=1000,
+             label.padding = unit(0.15, "lines"),
+             label.r = unit(0.25, "lines"),
+             inherit.aes = TRUE,
+             min.segment.length = 0.1)
+
+print(plot)
+dev.off()
+
+}
+
+```
+
+#### Violin plots of specific genes in the Lung Organoids
+
+```{r}
+
+tissue_of_interest="Lung"
+
+genes <- rev(**** Please see publication for gene list ****)
+
+Gene_list_noDuplicates <- Gene_list_noDuplicates[!duplicated(Gene_list_noDuplicates$hgnc_symbol),]
+rownames(Gene_list_noDuplicates) <- Gene_list_noDuplicates$hgnc_symbol
+gene_names <- Gene_list_noDuplicates[genes,"hgnc_symbol"]
+genes <- Gene_list_noDuplicates[genes,"ensembl_gene_id"]
+
+pjsamples_filtered <- pjsamples[pjsamples$organoid_tissue_label==tissue_of_interest,]
+pjsamples_filtered <- pjsamples_filtered[!is.na(pjsamples_filtered$organoid_line),]
+pjsamples_filtered <- pjsamples_filtered[pjsamples_filtered$Differentiated=="N",]
+pjsamples_filtered <- pjsamples_filtered[!pjsamples_filtered$condition=="CDH",]
+cpm_batch_correction <- as.data.frame(cpm_batch_correction)
+cpm_batch_filtered <- cpm_batch_correction[,pjsamples_filtered$organoid_line]
+
+genes <- genes[genes %in% rownames(cpm_batch_filtered)]
+
+data <- as.data.frame(cpm_batch_filtered[genes[1],])
+
+for (x in c(2:(length(genes)))) {
+  data[x,] <- cpm_batch_filtered[genes[x],]
+}
+data <- t(data)
+colnames(data) <- genes
+data <- as.data.frame(data)
+data$organoid_line <- rownames(data)
+
+data <- merge(data, pjsamples_filtered, by="organoid_line")
+table(is.na(data$organoid_line))
+data <- data[,c(genes, "organoid_line", "condition")]
+
+## Data was then inputted into Prism for visualisation
+
+```
+
+#### Lung Genes Dotplot
+
+```{r}
+
+## Rename samples for better description within the dotplot
+pjsamples_outlier$full_name <- as.vector(paste0(pjsamples_outlier$organoid_line," ",
+                                                       pjsamples_outlier$condition, " ",
+                                                       pjsamples_outlier$GA,"GA "))
+pjsamples_outlier$full_name <- gsub(" H", "", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub("_", " ", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub("999", "?", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub("S20w 20pcw", "Fetal Stomach 22w", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub("S18w 18pcw", "Fetal Stomach 20w", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub("S11w 11pcw", "Fetal Stomach 13w", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub("SI11w 11pcw", "Fetal SI 13w", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub("L9w 9pcw", "Fetal Lung 11w", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub("L12w 12pcw", "Fetal Lung 14w", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub("K12w 12pcw", "Fetal Kidney 14w", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub(" SB", "", pjsamples_outlier$full_name)
+pjsamples_outlier$organoid_line <- gsub("w", "GA", pjsamples_outlier$organoid_line)
+pjsamples_outlier$full_name <- gsub("NA", "?", pjsamples_outlier$full_name)
+pjsamples_outlier$full_name <- gsub("_", " ", pjsamples_outlier$full_name)
+pjsamples_outlier$GA <- as.numeric(pjsamples_outlier$GA)
+
+
+#### Importing lung markers
+lung_marker_list <- read.csv(**** Please see publication for gene list ****, header=TRUE)
+
+lung_marker_list <- lung_marker_list %>% purrr::map_df(rev)
+
+lung_genes <- as.matrix(lung_marker_list[,1])
+
+colnames(lung_marker_list) <- c("hgnc_symbol", "organoid_line")
+lung_marker_present <- merge(lung_marker_list,Gene_list_noDuplicates,by=("hgnc_symbol"))
+colnames(lung_marker_present) <- c("Gene", "organoid_line", "ENSEMBL", "ENTREZ")
+
+# Select only genes present in the data
+lung_marker_present <- lung_marker_present[(lung_marker_present$ENSEMBL %in% rownames(cpm_batch_correction)),]
+
+data <- as.data.frame(cpm_batch_correction[lung_marker_present$ENSEMBL,])
+colnames(data) <- colnames(cpm_batch_correction)
+
+data$Gene <- lung_marker_present$Gene
+data$GeneFunction <- lung_marker_present$organoid_line
+
+formatted_data <- data %>% tidyr::pivot_longer(!c(Gene, GeneFunction), names_to = "Sample", values_to = "Expression")
+
+## Remove zero data from database
+formatted_data[formatted_data$Expression==0,] <- NA
+formatted_data <- formatted_data[complete.cases(formatted_data), ]
+
+## Make expression from 0 - 1 within each genes
+formatted_data <- formatted_data %>% group_by(Gene) %>% mutate(RelExpression = (Expression / max(Expression)))
+
+## For the annotation boxes
+organoid_lines <- as.factor(unique(lung_marker_list$organoid_line))
+ymin_string <- 0.5
+lapply(c(1:(length(organoid_lines)-1)), function(x){
+  ymin_string <<- c(ymin_string, (table(lung_marker_list$organoid_line)[[organoid_lines[x]]])+ymin_string[x])
+})
+ymax_string <- (table(lung_marker_list$organoid_line)[[organoid_lines[1]]]+0.5)
+lapply(c(2:length(organoid_lines)), function(y){
+  ymax_string <<- c(ymax_string, (table(lung_marker_list$organoid_line)[[organoid_lines[y]]])+ymax_string[y-1])
+})
+
+
+
+## Randomly select organoids from within each patient, to reduce total number shown
+lung_samples <- pjsamples_outlier[pjsamples_outlier$organoid_tissue_label=="Lung",]
+undiff_lung_samples <- lung_samples[(lung_samples$Differentiated=="N"),]
+undiff_lung_samples <- undiff_lung_samples[undiff_lung_samples$derivation!="Fetal organoid_line-derived Control Organoids",]
+undiff_lung_samples <- undiff_lung_samples[order(undiff_lung_samples$GA, decreasing=FALSE),]
+
+# Select patients with more than 5 organoids and randomly select 4
+undiff_patients = table(undiff_lung_samples$patient)
+undiff_patients <- undiff_patients[undiff_patients>5]
+
+undiff_patient_select = undiff_lung_samples[(undiff_lung_samples$patient==names(undiff_patients)[1]),]
+undiff_patient_select <- undiff_patient_select[c(1,4,8,10,12,14),]
+undiff_lung_samples <- undiff_lung_samples[!undiff_lung_samples$patient==names(undiff_patients)[1],]
+undiff_lung_samples <- rbind(undiff_lung_samples, undiff_patient_select)
+
+undiff_patient_select=undiff_lung_samples[(undiff_lung_samples$patient==names(undiff_patients)[2]),]
+undiff_patient_select <- undiff_patient_select[c(1,3,5,7,9),]
+undiff_lung_samples <- undiff_lung_samples[!undiff_lung_samples$patient==names(undiff_patients)[2],]
+undiff_lung_samples <- rbind(undiff_lung_samples, undiff_patient_select)
+
+undiff_patient_select=undiff_lung_samples[(undiff_lung_samples$patient==names(undiff_patients)[3]),]
+undiff_patient_select <- undiff_patient_select[c(1,2,3,5),]
+undiff_lung_samples <- undiff_lung_samples[!undiff_lung_samples$patient==names(undiff_patients)[3],]
+undiff_lung_samples <- rbind(undiff_lung_samples, undiff_patient_select)
+
+diff_lung_samples <- lung_samples[(lung_samples$Differentiated=="Y"),]
+diff_lung_samples <- diff_lung_samples[order(diff_lung_samples$GA, decreasing=FALSE),]
+control_lung_samples <- lung_samples[(lung_samples$derivation=="Fetal organoid_line-derived Control Organoids"),]
+
+lung_samples <- rbind(control_lung_samples[order(control_lung_samples$GA, decreasing=FALSE),],
+                        undiff_lung_samples[order(undiff_lung_samples$GA, decreasing=FALSE),],
+                        diff_lung_samples[order(diff_lung_samples$Differentiated_type, decreasing=TRUE),])
+
+
+
+
+pdf((paste0(working_dir, "/dotplots/Organoids lung Markers log.pdf")),
+    width=5+(length(rownames(lung_samples))/8), 
+    height=length(lung_genes)/4)
+
+plot <- ggplot(formatted_data, aes(x = Sample, y = Gene)) +
+ geom_point(aes(colour = RelExpression, size=log(Expression)),
+                          shape=16
+                          ) +
+  scale_size(limits = c(0,NA),
+             range = c(1,6), name="log(CPM)",
+             breaks=c(0,2,4,8,12)) +
+  scale_color_gradient2(mid = "#edb4b4", high="#590101", name="Relative \nExpression", limits=c(0, 1), breaks=c(0, 0.5, 1)) +
+ scale_y_discrete(limits = factor(lung_genes)) +
+ scale_x_discrete(limits = lung_samples$organoid_line, labels=lung_samples$full_name) +
+  coord_cartesian(clip="off") +
+  labs(
+                 y = NULL,
+                 x = NULL,
+                 title = NULL
+                          )  +
+  theme_light(
+    base_family = "sans",
+    base_line_size = 0.4,
+    base_rect_size = 0.1,
+    base_size = 14
+     ) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+          legend.position='left', 
+          legend.justification='top',
+          legend.direction='vertical',
+          axis.text.y = element_text(face = "italic")) +
+    annotate(
+      xmin = (length(rownames(lung_samples))+0.6),
+      xmax = (length(rownames(lung_samples))+1.1),
+      ymin = ymin_string,
+      ymax = ymax_string,
+      geom = "rect",
+      fill = rep(c("gray20", "gray55"), 20)[c(1:length(unique(lung_marker_list$organoid_line)))])
+  
+print(plot)
+dev.off()
+
+```
+#### Kidney Genes Dotplot
+
+```{r}
+
+#### Importing kidney markers
+kidney_marker_list <- read.csv(**** Please see publication for gene list ****, header=TRUE)
+
+kidney_marker_list <- kidney_marker_list %>% purrr::map_df(rev)
+
+kidney_genes <- as.matrix(kidney_marker_list[,1])
+
+colnames(kidney_marker_list) <- c("hgnc_symbol", "organoid_line", "2ndLabel")
+kidney_marker_present <- merge(kidney_marker_list,Gene_list_noDuplicates,by=("hgnc_symbol"))
+colnames(kidney_marker_present) <- c("Gene", "organoid_line", "2ndLabel","ENSEMBL", "ENTREZ")
+
+# Select only genes present in the data
+kidney_marker_present <- kidney_marker_present[(kidney_marker_present$ENSEMBL %in% rownames(cpm_batch_correction)),]
+
+data <- as.data.frame(cpm_batch_correction[kidney_marker_present$ENSEMBL,])
+colnames(data) <- colnames(cpm_batch_correction)
+
+data$Gene <- kidney_marker_present$Gene
+data$GeneFunction <- kidney_marker_present$organoid_line
+# data$ensembl <- rownames(data)
+
+data <- data[,c(rownames(pjsamples_outlier[pjsamples_outlier$organoid_tissue_label=="Kidney",]), "Gene", "GeneFunction")]
+
+formatted_data <- data %>% tidyr::pivot_longer(!c(Gene, GeneFunction), names_to = "Sample", values_to = "Expression")
+
+## Remove zero data from database
+formatted_data[formatted_data$Expression==0,] <- NA
+formatted_data <- formatted_data[complete.cases(formatted_data), ]
+
+## Make expression from 0 - 1 within each genes
+formatted_data <- formatted_data %>% group_by(Gene) %>% mutate(RelExpression = (Expression / max(Expression)))
+
+
+## For the annotation boxes
+organoid_lines <- as.factor(unique(kidney_marker_list$organoid_line))
+ymin_string <- 0.5
+lapply(c(1:(length(organoid_lines)-1)), function(x){
+  ymin_string <<- c(ymin_string, (table(kidney_marker_list$organoid_line)[[organoid_lines[x]]])+ymin_string[x])
+})
+ymax_string <- (table(kidney_marker_list$organoid_line)[[organoid_lines[1]]]+0.5)
+lapply(c(2:length(organoid_lines)), function(y){
+  ymax_string <<- c(ymax_string, (table(kidney_marker_list$organoid_line)[[organoid_lines[y]]])+ymax_string[y-1])
+})
+
+
+
+## Randomly select organoids from within each patient, to reduce total number shown
+kidney_samples <- pjsamples_outlier[pjsamples_outlier$organoid_tissue_label=="Kidney",]
+undiff_kidney_samples <- kidney_samples[(kidney_samples$Differentiated=="N"),]
+undiff_kidney_samples <- undiff_kidney_samples[undiff_kidney_samples$derivation!="Fetal organoid_line-derived Control Organoids",]
+
+# Select patients with more than 5 organoids and randomly select 4
+undiff_patients = table(undiff_kidney_samples$patient)
+undiff_patients <- undiff_patients[undiff_patients>5]
+
+undiff_patient_select = undiff_kidney_samples[(undiff_kidney_samples$patient==names(undiff_patients)[1]),]
+undiff_patient_select <- undiff_patient_select[c(1,3,5,7),]
+undiff_kidney_samples <- undiff_kidney_samples[!undiff_kidney_samples$patient==names(undiff_patients)[1],]
+undiff_kidney_samples <- rbind(undiff_kidney_samples, undiff_patient_select)
+
+undiff_patient_select=undiff_kidney_samples[(undiff_kidney_samples$patient==names(undiff_patients)[2]),]
+undiff_patient_select <- undiff_patient_select[c(1,3,5,7),]
+undiff_kidney_samples <- undiff_kidney_samples[!undiff_kidney_samples$patient==names(undiff_patients)[2],]
+undiff_kidney_samples <- rbind(undiff_kidney_samples, undiff_patient_select)
+
+undiff_patient_select=undiff_kidney_samples[(undiff_kidney_samples$patient==names(undiff_patients)[3]),]
+undiff_patient_select <- undiff_patient_select[c(1,4,8,10,12),]
+undiff_kidney_samples <- undiff_kidney_samples[!undiff_kidney_samples$patient==names(undiff_patients)[3],]
+undiff_kidney_samples <- rbind(undiff_kidney_samples, undiff_patient_select)
+
+control_kidney_samples <- kidney_samples[(kidney_samples$derivation=="Fetal organoid_line-derived Control Organoids"),]
+diff_kidney_samples <- kidney_samples[(kidney_samples$Differentiated=="Y"),]
+
+kidney_samples <- rbind(control_kidney_samples[order(control_kidney_samples$GA, decreasing=FALSE),],
+                        undiff_kidney_samples[order(undiff_kidney_samples$GA, decreasing=FALSE),],
+                        diff_kidney_samples[order(diff_kidney_samples$GA, decreasing=FALSE),])
+
+
+
+pdf((paste0(working_dir, "/dotplots/Organoids kidney Markers log.pdf")),
+    width=5+(length(rownames(kidney_samples))/8),
+    height=length(kidney_genes)/4)
+
+ggplot(formatted_data, aes(x = Sample, y = Gene)) +
+ geom_point(aes(colour = RelExpression, size=log(Expression)),
+                          shape=16
+                          ) +
+  scale_size(limits = c(0,NA), range = c(1,6), name="log(CPM)", breaks=c(0,2,4,6)) +
+  scale_color_gradient2(mid = "#edb4b4", high="#590101", name="Relative \nExpression", limits=c(0, 1), breaks=c(0, 0.5, 1)) +
+ scale_y_discrete(limits = factor(kidney_genes)) +
+ scale_x_discrete(limits = kidney_samples$organoid_line, labels=kidney_samples$full_name) +
+  coord_cartesian(clip="off") +
+  labs(
+                 y = NULL,
+                 x = NULL,
+                 title = NULL
+                          )  +
+  theme_light(
+    base_family = "sans",
+    base_line_size = 0.4,
+    base_rect_size = 0.1,
+    base_size = 14
+     ) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+          legend.position='left', 
+          legend.justification='top',
+          legend.direction='vertical',
+          axis.text.y = element_text(face = "italic")) +
+    annotate(
+      xmin = (length(rownames(kidney_samples))+0.6), 
+      xmax = (length(rownames(kidney_samples))+1.1),
+      ymin = ymin_string, 
+      ymax = ymax_string,
+      geom = "rect",
+      fill = rep(c("gray20", "gray55"), 20)[c(1:length(unique(kidney_marker_list$organoid_line)))])
+
+dev.off()
+
+```
+
+#### Intestine Genes Dotplot
+
+```{r}
+
+#### Importing intestine markers
+intestine_marker_list <- read.csv(**** Please see publication for gene list ****, header=TRUE)
+
+samples_plotting_by_week_filtered <- pjsamples_outlier[pjsamples_outlier$organoid_tissue_label=="Small Intestine",]
+
+intestine_marker_list <- intestine_marker_list %>% purrr::map_df(rev)
+
+intestine_genes <- as.matrix(intestine_marker_list[,1])
+
+colnames(intestine_marker_list) <- c("hgnc_symbol", "organoid_line")
+intestine_marker_present <- merge(intestine_marker_list,Gene_list_noDuplicates,by=("hgnc_symbol"))
+colnames(intestine_marker_present) <- c("Gene", "organoid_line", "ENSEMBL", "ENTREZ")
+
+# Select only genes present in the data
+intestine_marker_present <- intestine_marker_present[(intestine_marker_present$ENSEMBL %in% rownames(cpm_batch_correction)),]
+
+data <- as.data.frame(cpm_batch_correction[intestine_marker_present$ENSEMBL,])
+colnames(data) <- colnames(cpm_batch_correction)
+
+data$Gene <- intestine_marker_present$Gene
+data$GeneFunction <- intestine_marker_present$organoid_line
+
+data <- data[,c(rownames(samples_plotting_by_week_filtered), "Gene", "GeneFunction")]
+
+formatted_data <- data %>% tidyr::pivot_longer(!c(Gene, GeneFunction), names_to = "Sample", values_to = "Expression")
+
+## Remove zero data from database
+formatted_data[formatted_data$Expression==0,] <- NA
+formatted_data <- formatted_data[complete.cases(formatted_data), ]
+
+## Make expression from 0 - 1 within each genes
+formatted_data <- formatted_data %>% group_by(Gene) %>% mutate(RelExpression = (Expression / max(Expression)))
+
+## For the annotation boxes
+organoid_lines <- as.factor(unique(intestine_marker_list$organoid_line))
+ymin_string <- 0.5
+lapply(c(1:(length(organoid_lines)-1)), function(x){
+  ymin_string <<- c(ymin_string, (table(intestine_marker_list$organoid_line)[[organoid_lines[x]]])+ymin_string[x])
+})
+ymax_string <- (table(intestine_marker_list$organoid_line)[[organoid_lines[1]]]+0.5)
+lapply(c(2:length(organoid_lines)), function(y){
+  ymax_string <<- c(ymax_string, (table(intestine_marker_list$organoid_line)[[organoid_lines[y]]])+ymax_string[y-1])
+})
+
+
+## Randomly select organoids from within each patient, to reduce total number shown
+intestine_samples <- pjsamples_outlier[pjsamples_outlier$organoid_tissue_label=="Small Intestine",]
+undiff_intestine_samples <- intestine_samples[(intestine_samples$Differentiated=="N"),]
+undiff_intestine_samples <- undiff_intestine_samples[undiff_intestine_samples$derivation!="Fetal organoid_line-derived Control Organoids",]
+undiff_intestine_samples <- undiff_intestine_samples[order(undiff_intestine_samples$GA),]
+
+# Add gap column before rings
+diff_intestine_samples <- intestine_samples[(intestine_samples$Differentiated=="Y"),]
+diff_intestine_samples <- diff_intestine_samples[c(1:4, NA, 5:6),]
+
+intestine_samples <- rbind(intestine_samples[(intestine_samples$derivation=="Fetal organoid_line-derived Control Organoids"),],
+                        undiff_intestine_samples[order(undiff_intestine_samples$GA),],
+                        diff_intestine_samples)
+
+
+
+pdf((paste0(working_dir, "/dotplots/Organoids intestine Markers log.pdf")), 
+    width=5+(length(rownames(samples_plotting_by_week_filtered))/8), 
+    height=length(intestine_genes)/4)
+
+ggplot(formatted_data, aes(x = Sample, y = Gene)) +
+ geom_point(aes(colour = RelExpression, size=log(Expression)),
+                          shape=16
+                          ) +
+  scale_size(limits = c(0,NA),
+             range = c(1,6), name="log(CPM)", breaks=c(0,2,6,8)) +
+  scale_color_gradient2(mid = "#edb4b4", high="#590101", name="Relative \nExpression", limits=c(0, 1), breaks=c(0, 0.5, 1)) +
+ scale_y_discrete(limits = factor(intestine_genes)) +
+ scale_x_discrete(limits = rownames(intestine_samples),
+                  labels=intestine_samples$full_name) +
+  coord_cartesian(clip="off") +
+  labs(
+                 y = NULL,
+                 x = NULL,
+                 title = NULL
+                          )  +
+  theme_light(
+    base_family = "sans",
+    base_line_size = 0.4,
+    base_rect_size = 0.1,
+    base_size = 14
+     ) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+          legend.position='left', 
+          legend.justification='top',
+          legend.direction='vertical',
+          axis.text.y = element_text(face = "italic")) +
+    annotate(
+      xmin = (length(rownames(intestine_samples))+0.6), 
+      xmax = (length(rownames(intestine_samples))+1.1),
+      ymin = ymin_string, 
+      ymax = ymax_string,
+      geom = "rect",
+      fill = rep(c("gray20", "gray55"), 20)[c(1:length(unique(intestine_marker_list$organoid_line)))])
+
+dev.off()
+
+```
+
+#### Diffentiated vs Undifferentiated - Lung Proximal
+
+```{r}
+
+if (differentiated=="Y"){
+  
+    pjsamples_diff_lung <-  pjsamples_outlier[pjsamples_outlier$organoid_tissue_label=="Lung",]
+    pjsamples_diff_lung_diff <-  pjsamples_diff_lung[pjsamples_diff_lung$Differentiated=="Y",]
+    pjsamples_diff_lung_diff <- pjsamples_diff_lung_diff[pjsamples_diff_lung_diff$Differentiated_type=="Proximal",]
+
+    pjsamples_diff_lung_healthy <- pjsamples_diff_lung[pjsamples_diff_lung$condition=="H",]
+    pjsamples_diff_lung_healthy <- pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$derivation=="Amniotic Fluid-derived Organoids",]
+    pjsamples_diff_lung_healthy <- pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$Differentiated=="N",]
+    pjsamples_diff_lung_healthy <- rbind(pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$GA==20,],
+                                           pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$GA==21,],
+                                           pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$GA==22,],
+                                           pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$GA==24,],
+                                           pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$GA==25,])
+    pjsamples_diff_healthy <- pjsamples_diff_lung_healthy[order(pjsamples_diff_lung_healthy$GA),]
+    pjsamples_diff <- rbind(pjsamples_diff_healthy, pjsamples_diff_lung_diff)
+    
+    cpm_diff <- cpm_batch_correction[, pjsamples_diff$organoid_line]
+    genes_names=c(**** Please see publication for gene list ****)
+    
+    # Convert gene names to ensembl gene ID
+    Gene_list_noDuplicates <- Gene_list_noDuplicates[!duplicated(Gene_list_noDuplicates$hgnc_symbol),]
+    rownames(Gene_list_noDuplicates) <- Gene_list_noDuplicates$hgnc_symbol
+    gene_names <- Gene_list_noDuplicates[genes_names,"hgnc_symbol"]
+    genes <- Gene_list_noDuplicates[genes_names,"ensembl_gene_id"]
+
+    genes <- genes[genes %in% rownames(cpm_diff)]
+    data <- as.data.frame(cpm_diff[genes[1],])
+    for (x in c(2:(length(genes)))) {
+      data[,x] <- cpm_diff[genes[x],]
+    }
+    colnames(data) <- genes_names
+    data <- as.data.frame(data)
+    data$organoid_line <- rownames(data)
+    
+    data <- merge(data, pjsamples_diff, by="organoid_line")
+    table(is.na(data$organoid_line))
+    data <- data[,c(genes_names, "organoid_line", "Differentiated")]
+    
+    setwd(working_dir)
+    write.csv(data,paste0("Lung Proximal DIFF expression.csv"))
+    #### Visualisation was completed in Prism
+}
+
+```
+
+#### Diffentiated vs Undifferentiated - Lung Distal/Alveolar
+
+```{r}
+
+if (differentiated=="Y"){
+  
+    pjsamples_diff_lung <-  pjsamples_outlier[pjsamples_outlier$organoid_tissue_label=="Lung",]
+    pjsamples_diff_lung_diff <-  pjsamples_diff_lung[pjsamples_diff_lung$Differentiated=="Y",]
+    pjsamples_diff_lung_diff <- pjsamples_diff_lung_diff[pjsamples_diff_lung_diff$Differentiated_type=="Alveolar",]
+
+    pjsamples_diff_lung_healthy <- pjsamples_diff_lung[pjsamples_diff_lung$condition=="H",]
+    pjsamples_diff_lung_healthy <- pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$derivation=="Amniotic Fluid-derived Organoids",]
+    pjsamples_diff_lung_healthy <- pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$Differentiated=="N",]
+    pjsamples_diff_lung_healthy <- rbind(pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$GA==20,],
+                                           pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$GA==21,],
+                                           pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$GA==22,],
+                                           pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$GA==24,],
+                                           pjsamples_diff_lung_healthy[pjsamples_diff_lung_healthy$GA==25,])
+    pjsamples_diff_healthy <- pjsamples_diff_lung_healthy[order(pjsamples_diff_lung_healthy$GA),]
+    pjsamples_diff <- rbind(pjsamples_diff_healthy, pjsamples_diff_lung_diff)
+    
+    cpm_diff <- cpm_batch_correction[, pjsamples_diff$organoid_line]
+    genes_names=c(**** Please see publication for gene list ****)
+    
+    # Convert gene names to ensembl gene ID
+    Gene_list_noDuplicates <- Gene_list_noDuplicates[!duplicated(Gene_list_noDuplicates$hgnc_symbol),]
+    rownames(Gene_list_noDuplicates) <- Gene_list_noDuplicates$hgnc_symbol
+    gene_names <- Gene_list_noDuplicates[genes_names,"hgnc_symbol"]
+    genes <- Gene_list_noDuplicates[genes_names,"ensembl_gene_id"]
+    
+    genes <- genes[genes %in% rownames(cpm_diff)]
+    data <- as.data.frame(cpm_diff[genes[1],])
+    for (x in c(2:(length(genes)))) {
+      data[,x] <- cpm_diff[genes[x],]
+    }
+    colnames(data) <- genes_names
+    data <- as.data.frame(data)
+    data$organoid_line <- rownames(data)
+    
+    data <- merge(data, pjsamples_diff, by="organoid_line")
+    table(is.na(data$organoid_line))
+    data <- data[,c(genes_names, "organoid_line", "Differentiated")]
+    
+    setwd(working_dir)
+    write.csv(data,paste0("Lung Distal DIFF expression.csv"))
+    #### Visualisation was completed in Prism
+}
+
+```
+
+#### Diffentiated vs Undifferentiated - Kidney
+
+```{r}
+
+if (differentiated=="Y"){
+
+    pjsamples_diff_kidney <-  pjsamples_outlier[pjsamples_outlier$organoid_tissue_label=="Kidney",]
+    pjsamples_diff_kidney_diff <-  pjsamples_diff_kidney[pjsamples_diff_kidney$Differentiated=="Y",]
+    pjsamples_diff_kidney_healthy <- pjsamples_diff_kidney[pjsamples_diff_kidney$condition=="H",]
+    pjsamples_diff_kidney_healthy <- pjsamples_diff_kidney_healthy[pjsamples_diff_kidney_healthy$derivation=="Amniotic Fluid-derived Organoids",]
+    pjsamples_diff_kidney_healthy <- pjsamples_diff_kidney_healthy[pjsamples_diff_kidney_healthy$Differentiated=="N",]
+    pjsamples_diff_kidney_healthy <- rbind(pjsamples_diff_kidney_healthy[pjsamples_diff_kidney_healthy$GA==22,],
+                                           pjsamples_diff_kidney_healthy[pjsamples_diff_kidney_healthy$GA==24,],
+                                           pjsamples_diff_kidney_healthy[pjsamples_diff_kidney_healthy$GA==25,])
+    pjsamples_diff_healthy <- pjsamples_diff_kidney_healthy[order(pjsamples_diff_kidney_healthy$GA),]
+    pjsamples_diff <- rbind(pjsamples_diff_healthy, pjsamples_diff_kidney_diff)
+    
+    cpm_diff <- cpm_batch_correction[, pjsamples_diff$organoid_line]
+    genes_names=c(**** Please see publication for gene list ****)
+    
+    # Convert gene names to ensembl gene ID
+    Gene_list_noDuplicates <- Gene_list_noDuplicates[!duplicated(Gene_list_noDuplicates$hgnc_symbol),]
+    rownames(Gene_list_noDuplicates) <- Gene_list_noDuplicates$hgnc_symbol
+    gene_names <- Gene_list_noDuplicates[genes_names,"hgnc_symbol"]
+    genes <- Gene_list_noDuplicates[genes_names,"ensembl_gene_id"]
+    
+    
+    
+    genes <- genes[genes %in% rownames(cpm_diff)]
+    
+    data <- as.data.frame(cpm_diff[genes[1],])
+    
+    for (x in c(2:(length(genes)))) {
+      data[,x] <- cpm_diff[genes[x],]
+    }
+    colnames(data) <- genes_names
+    data <- as.data.frame(data)
+    data$organoid_line <- rownames(data)
+    
+    data <- merge(data, pjsamples_diff, by="organoid_line")
+    table(is.na(data$organoid_line))
+    data <- data[,c(genes_names, "organoid_line", "Differentiated")]
+    
+    setwd(working_dir)
+    write.csv(data,paste0("Kidney DIFF expression.csv"))
+    #### Visualisation was completed in Prism
+}
+
+```
+
+#### DEGs comparison of each organoid_line to the other 2 organoid_lines
+
+```{r}
+
+organoid_lines=c("Lung", "Kidney", "Small Intestine")
+
+lapply(c(1:length(organoid_lines)), function(g){
+
+pjsamples_DEG_organoid_line_comp <- pjsamples_outlier
+pjsamples_DEG_organoid_line_comp <- pjsamples_DEG_organoid_line_comp[pjsamples_DEG_organoid_line_comp$Differentiated=="N",]
+pjsamples_DEG_organoid_line_comp <- pjsamples_DEG_organoid_line_comp[pjsamples_DEG_organoid_line_comp$derivation=="Amniotic Fluid-derived Organoids",]
+	
+pjsamples_DEG_organoid_line_comp$cluster <- 1
+pjsamples_DEG_organoid_line_comp[pjsamples_DEG_organoid_line_comp$organoid_tissue_label==organoid_lines[g],"cluster"] <- 2
+
+output_dir=paste0(working_dir, "/differential_expression_analysis")
+setwd(output_dir)
+
+rownames(pjsamples_DEG_organoid_line_comp)=pjsamples_DEG_organoid_line_comp$organoid_line
+
+## IMPORTANT: colnames(matrix_outlier)==rownames(pjsamples)
+# Create vector of matrix column names and order PJsamples by that
+matrix_column_names <- c(colnames(cpm_batch_correction))
+pjsamples_batch_filtered_ordered <- pjsamples_DEG_organoid_line_comp[(matrix_column_names), ]
+pjsamples_batch_filtered_ordered_rownames <- c(rownames(pjsamples_DEG_organoid_line_comp))
+
+# Detect and save number of samples in any condition
+min_num_samples=min(table(pjsamples_DEG_organoid_line_comp$cluster))
+
+pjsamples_DEG_organoid_line_comp$cluster <- as.factor(pjsamples_DEG_organoid_line_comp$cluster)
+
+complete_matrix_outlier_DEG <- complete_matrix_outlier_batch_adjusted[,rownames(pjsamples_DEG_organoid_line_comp)]
+
+#Create DESeq2 object
+deseq2object <- DESeqDataSetFromMatrix(countData = complete_matrix_outlier_DEG,
+                                       colData = pjsamples_DEG_organoid_line_comp,
+                                       design = ~ cluster)
+
+#Pre-filter data
+genes_to_keep <- rowSums(cpm(complete_matrix_outlier) > 1) > (min_num_samples-1)
+
+deseq2object <- deseq2object[genes_to_keep,]
+deseq2object <- DESeq(deseq2object)
+deseq2_results <- results(deseq2object, contrast=c("cluster","1","2"))
+
+summary(deseq2_results)
+
+## Set volcano plot parameters
+volc=as.data.frame(deseq2_results)
+volc$DE=ifelse(volc[,"log2FoldChange"]>1 & volc[,"padj"]<0.05, "Up", "NDE")
+volc$DE=ifelse(volc[,"log2FoldChange"]<=-1 & volc[,"padj"]<0.05, "Down", volc$DE)
+
+volc_df=volc
+volc_df$ensembl_gene_id <- rownames(volc_df)
+volc_df <- merge(volc_df, Gene_list_noDuplicates, by="ensembl_gene_id")
+write.table(volc_df, paste0(output_dir, "/DESeq2_output_matrix_", organoid_lines[g], "VsOthers.txt"), sep="\t", quote=F)
+#### Gene ontology was completed with Metascape
+
+volc[,"padj"]=-log10(volc[,"padj"])
+
+## Compare cluster 1 vs 2
+comp="1 vs 2"
+
+## Define DEGs
+de_genes=volc[volc$DE!="NDE","DE",drop=F]
+
+pdf(paste0(output_dir, "/volcano_DEG_plot_", organoid_lines[g], "VsOthers.pdf"), height=8, width=12)
+  print(ggplot(volc, aes(x = volc[,"log2FoldChange"], y = volc[,"padj"], color = DE))+
+  geom_point(size = 3, na.rm = T) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "none")+
+  xlab(paste0("LFC (", comp, ")")) +
+  ylab(expression(-log[10]("FDR"))) +
+  geom_hline(yintercept = -log10(0.01), colour="#990000", linetype="dashed") + geom_vline(xintercept = 1, colour="#990000", linetype="dashed") + geom_vline(xintercept = -1, colour="#990000", linetype="dashed")+
+  scale_color_manual(values = c("blue4", "grey70", "red4")) +
+  scale_y_continuous(trans = "log1p") +
+    annotate(geom="text", x=min(volc[,"log2FoldChange"])/1.5, y=1.6, label=as.character(sum(volc$DE=="Down")), color="blue4", size=8)+
+  annotate(geom="text", x=max(volc[,"log2FoldChange"])/1.5, y=1.6, label=as.character(sum(volc$DE=="Up")), color="red4",size=8))
+dev.off()
+
+})
+
+```
+
