@@ -1,0 +1,584 @@
+---
+LAFO Bulk RNAseq Analysis Pipeline
+---
+
+#### Install packages, import matrices and set paths
+
+```{r}
+
+# Set paths
+working_dir="R_outputs/"
+countmatrix_path="feature_counts/"
+pjsamples_dir="R_inputs/"
+GSEA_pathways_path="GMT_pathways/"
+
+# Load packages
+library(ggplot2)
+library(ggrepel)
+library(edgeR)
+library(pheatmap)
+library(reshape2)
+library(RColorBrewer)
+library(viridis)
+library(biomaRt)
+library(DESeq2)
+library(sva)
+library(tidyselect)
+library(fgsea)
+library(clusterProfiler)
+library(xCell)
+
+```
+
+#### Isolating count data from matrices, combining and reordering the complete matrix
+- Download Ensembl <-> Gene Name list
+
+```{r}
+
+multi_join=function(list_of_loaded_data, join_func, ...){
+  require("dplyr")
+  output <- Reduce(function(x, y) {join_func(x, y, ...)}, list_of_loaded_data)
+  return(output)
+}
+
+setwd(countmatrix_path)
+all_counts=list.files(".", pattern=".txt")       # Make a list of all .txt files
+all_counts=all_counts[!grepl("summary",all_counts)] # Delete summary.txt rows
+all_counts=all_counts[!grepl("Gene_list.txt",all_counts)] # Delete header
+print(all_counts)
+df=lapply(all_counts, read.table, skip=1, header=T) # Skip first line, take new first line as header values
+for(i in 1:length(df)){               # For each individual count matrix...
+  df[[i]]=df[[i]][,c(1,7)]
+  colnames(df[[i]])=c("Geneid", gsub("_R1_001_counts.txt","", all_counts[i]))
+}
+complete_matrix_1=multi_join(df, full_join)   # Combine all count matrices
+colnames(complete_matrix_1) <- gsub("sample_", "", colnames(complete_matrix_1))
+
+
+complete_matrix[is.na(complete_matrix)] = 0
+colnames(complete_matrix) [1] <- "ensembl_gene_id"       # Name first column GeneID
+
+# Create list (Gene_list) of gene name/symbols, collected from the internet using BioMart package
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+genes <- complete_matrix$ensembl_gene_id
+Gene_list <- getBM(filters= "ensembl_gene_id", attributes= c("ensembl_gene_id",
+"entrezgene_id", "hgnc_symbol"),values=genes,mart=mart)
+Gene_list_noDuplicates <- Gene_list[!duplicated(Gene_list$ensembl_gene_id),]
+
+colnames(complete_matrix) <- gsub("_counts.txt","",colnames(complete_matrix))
+samples <- colnames(complete_matrix)[2:length(colnames(complete_matrix))]
+colnames(complete_matrix)[1] <- "ensembl_gene_id"
+
+# Combine Matrix & GeneIDs for export
+complete_matrix <- merge(complete_matrix,Gene_list_noDuplicates,by="ensembl_gene_id")
+complete_matrix_GeneSymbol <- complete_matrix[, c("hgnc_symbol",samples)]
+complete_matrix_Ensembl <- complete_matrix[, c("ensembl_gene_id",samples)]
+
+complete_matrix <- complete_matrix_Ensembl
+
+```
+`
+#### Set working directory and create output folder
+PJsamples.txt is file detailing the samples being analysed
+- In this situation it has 4 columns with the headers; 1) unique_samples	2) batch	3) condition	4) medium
+
+```{r}
+setwd(pjsamples_dir)
+pjsamples=read.csv("GSE220994_Organoids_Bulk_RNAseq_extended_metadata.csv")
+pjsamples$batch=factor(pjsamples$batch, levels=c("1", "2", "3", "4", "5"))
+
+output_dir=paste0(working_dir, "quality_controls")
+suppressWarnings(dir.create(output_dir))
+
+```
+
+### Remove non-expressed genes & normalize data to Counts per Million (CPM)
+
+```{r}
+
+# Remove any genes with no expression (sum of CPM = 0)
+complete_matrix=complete_matrix[rowSums(cpm(complete_matrix)>=1)!=0,]
+
+print(paste0(nrow(complete_matrix), " genes have at least 1 CPM in at least 1 sample"))
+
+## Produce CPM matrix
+cpm_complete <- cpm(complete_matrix)
+
+pjsamples=pjsamples[!is.na(pjsamples$batch),]
+```
+
+#### Initial quality assessment of all samples through PCA and HCL
+## Set functions
+
+```{r}
+
+### Plot outlier_removed PCA & HCL graphs
+## PCA plot - Tissue vs Batch
+  pca=prcomp(t(log2(cpm_complete+1)))
+  percentVar=pca$sdev^2/sum(pca$sdev^2)
+  d=data.frame(PC1=pca$x[,1], PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4], pjsamples, names=colnames(cpm_complete))
+  attr(d, "percentVar")=percentVar
+
+# Extract colours from the viridis rainbow colours scale package
+colour_plot <- ggplot(d, aes(x = PC1, y = PC2, fill=(factor(batch)))) +
+    scale_color_viridis(option="turbo", discrete=TRUE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+
+pdf(paste0(output_dir, "/pca_initial.pdf"), height=6, width=10)
+basic_pca_list=lapply(1:3, function(x){
+
+plot <- ggplot() +
+  geom_point(data=d,
+             aes(x=d[,x], y=d[,(x+1)], fill=d$batch, shape=d$batch),
+             colour="black", alpha=.7,size=3) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.text = element_text(size=10)) +
+  xlab(paste0("PC1: ", round(attr(d, "percentVar")[1] *100), "% variance")) +
+  ylab(paste0("PC", 1+x, ": ", round(attr(d, "percentVar")[1+x] *100), "% variance")) +
+  scale_shape_manual(values = c(21:25), name="Batch") +
+  guides(fill = "none", colour = guide_legend(override.aes=list(size=7))) +
+  theme(text=element_text(family="sans"))
+
+print(plot)
+})
+dev.off()
+
+## HCL
+sampleDists <- cor(log2(cpm_complete+1))
+sampleDistMatrix <- as.matrix(sampleDists)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+pdf(paste0(output_dir, "/heatmap_initial.pdf"), height=10, width=10)
+pheatmap(sampleDistMatrix, show_colnames = F, fontsize=8, legend=FALSE) +
+  theme(text=element_text(family="sans"))
+dev.off()
+
+```
+
+#### QC post-filtering
+
+```{r}
+cpm=cpm_outlier_removed
+
+pca=prcomp(t(log2(cpm+1)))
+percentVar=pca$sdev^2/sum(pca$sdev^2)
+d=data.frame(PC1=pca$x[,1], PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4], pjsamples_outlier, names=colnames(cpm))
+attr(d, "percentVar")=percentVar
+
+# Extract colours from the viridis rainbow colours scale package
+colour_plot <- ggplot(d, aes(x = PC1, y = PC2, fill=(factor(batch)))) +
+    scale_color_viridis(option="turbo", discrete=TRUE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+
+pdf(paste0(output_dir, "/pca_post_filtering.pdf"), height=6, width=10)
+basic_pca_list=lapply(1:3, function(x){
+
+plot <- ggplot() +
+  geom_point(data=d,
+             aes(x=d[,x], y=d[,(x+1)], fill=factor(batch), shape=factor(batch)),
+             colour="black", alpha=.7,size=3) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.text = element_text(size=10)) +
+  xlab(paste0("PC1: ", round(attr(d, "percentVar")[1] *100), "% variance")) +
+  ylab(paste0("PC", 1+x, ": ", round(attr(d, "percentVar")[1+x] *100), "% variance")) +
+  scale_shape_manual(values = c(21:25), name="Batch") +
+  guides(fill = "none", colour = guide_legend(override.aes=list(size=7))) +
+  theme(text=element_text(family="sans"))
+
+print(plot)
+})
+dev.off()
+
+## HCL
+sampleDists <- cor(log2(cpm+1))
+sampleDistMatrix <- as.matrix(sampleDists)
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+pdf(paste0(output_dir, "/heatmap_post_filtering.pdf"), height=10, width=10)
+pheatmap(sampleDistMatrix, show_colnames = F, fontsize=8, legend=FALSE) +
+  theme(text=element_text(family="sans"))
+dev.off()
+
+```
+
+#### Batch correction
+
+```{r}
+
+pjsamples_outlier$batch <- as.integer(pjsamples_outlier$batch)
+rownames(pjsamples_outlier) <- pjsamples_outlier$name
+
+co_variate <- as.data.frame(pjsamples_outlier$time)
+co_variate$condition <- pjsamples_outlier$condition
+rownames(co_variate) <- pjsamples_outlier$name
+
+complete_matrix_outlier_batch_adjusted <- ComBat_seq(as.matrix(complete_matrix_outlier),
+                                                     batch=as.factor(pjsamples_outlier$batch))
+
+cpm_batch_correction=cpm(complete_matrix_outlier_batch_adjusted)
+
+```
+
+#### Remove samples of choice
+
+```{r}
+
+pjsamples_outlier <- pjsamples_outlier[pjsamples_outlier$Differentiated=="N",] # If needed
+
+pjsamples_outlier <- pjsamples_outlier[pjsamples_outlier$identity=="LAFO",]
+
+cpm_batch_correction <- cpm_batch_correction[,pjsamples_outlier$unique_samples]
+
+```
+
+#### PCA
+
+```{r}
+
+d_labelled <- d
+d_labelled[(d_labelled$control=="Fetal Tissue-derived Control Organoids"),"labels"] <- d_labelled[(d_labelled$control=="Fetal Tissue-derived Control Organoids"),"tissue"]
+
+pdf(paste0(output_dir, "/pca_tissue.pdf"), height=7, width=13)
+
+colour_plot <- ggplot(d_labelled, aes(x = PC1, y = PC2, colour=as.character(organ))) +
+    scale_color_viridis(option="turbo", discrete=TRUE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+my_colours <- my_colours[c(3,2,1,4,5,6)]
+
+plot <- ggplot(data=d_labelled, aes(x=PC1, y=PC2, fill=as.character(organ))) +
+  geom_point(aes(shape=as.character(control)),
+             colour="black", alpha=.7,size=3) +
+    geom_point(data=d_labelled[d_labelled$control=="Fetal Tissue-derived Control Organoids",], 
+             aes(x=PC1, y=PC2, fill=as.character(organ)),
+             shape=21, colour="red", alpha=1,size=3,stroke=1) +
+  theme_light(base_family = "sans",
+    base_line_size = 0.2,
+    base_rect_size = 0.2,
+    base_size=12) +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  xlab(paste0("PC1: ", round(percentVar[1] *100), "% variance")) +
+  ylab(paste0("PC2: ", round(percentVar[2] *100), "% variance")) +
+  scale_shape_manual(values = c(24,21), name="Derivation") +
+  scale_fill_manual(values=my_colours, name="Classification") +
+  guides(shape=guide_legend(override.aes=list(size=5)),
+         fill=guide_legend(override.aes=list(size=5, fill=my_colours, shape=24, color="black"))) +
+  geom_text_repel(aes(label=labels),
+             color="black",
+             fontface = "bold",
+             size = 4.5, 
+             )
+print(plot)
+dev.off()
+
+
+pdf(paste0(output_dir, "/pca_labelled_time.pdf"), height=7, width=13)
+
+colour_plot <- ggplot(d_labelled, aes(x = PC1, y = PC2, colour=time)) +
+    scale_color_viridis(option="turbo", discrete=FALSE)
+my_colours <- unique((ggplot_build(colour_plot))[["data"]][[1]][["colour"]])
+
+plot <- ggplot() +
+  geom_point(data=d_labelled, 
+             aes(x=PC1, y=PC2, fill=as.numeric(time), shape=as.character(control)),
+             colour="black", alpha=.7,size=3) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.text = element_text(size=10)) +
+  xlab(paste0("PC1: ", round(percentVar[1] *100), "% variance")) +
+  ylab(paste0("PC2: ", round(percentVar[2] *100), "% variance")) +
+  scale_shape_manual(values = c(24,21), name="Derivation") +
+  scale_fill_viridis(option = "viridis", name="GA", direction = -1, limits=c(15,35)) +
+  theme(text=element_text(family="sans")         
+    )
+print(plot)
+dev.off()
+
+```
+
+#### Differential Expression Analysis (calculating DEGs)
+
+```{r}
+setwd(paste0(working_dir, "/differential_expression_analysis"))
+
+pjsamples_DEG=pjsamples_outlier
+rownames(pjsamples_DEG)=pjsamples_DEG[,"tissue"]
+
+## IMPORTANT: colnames(matrix_outlier)==rownames(pjsamples)
+# Create vector of matrix column names and order PJsamples by that
+matrix_column_names <- c(colnames(cpm_batch_correction))
+pjsamples_batch_filtered_ordered <- pjsamples_DEG[(matrix_column_names), ]
+pjsamples_batch_filtered_ordered_rownames <- c(rownames(pjsamples_batch_filtered_ordered))
+
+# Detect and save number of samples in any condition
+min_num_samples=min(table(pjsamples_DEG$cluster))
+
+complete_matrix_outlier_DEG <- complete_matrix_outlier_batch_adjusted[,colnames(cpm_batch_correction)]
+
+#Create DESeq2 object
+deseq2object <- DESeqDataSetFromMatrix(countData = complete_matrix_outlier_DEG,      # Use un-normalised matrix (DESeq2 normalises)
+                              colData = pjsamples_batch_filtered_ordered,
+                              design = ~ cluster)                       # Use the 'cluster' just defined
+
+#Pre-filter data
+genes_to_keep <- rowSums(cpm(complete_matrix_outlier) > 1) > (min_num_samples-1)
+
+deseq2object <- deseq2object[genes_to_keep,]
+deseq2object <- DESeq(deseq2object)
+deseq2_results <- results(deseq2object, contrast=c("cluster","1","2"))
+
+summary(deseq2_results)
+
+write.table(as.data.frame(deseq2_results), paste0(output_dir, "/DESeq2_output_matrix.txt"), sep="\t", quote=F)
+
+
+## Set volcano plot parameters
+volc=as.data.frame(deseq2_results)
+volc$DE=ifelse(volc[,2]>1 & volc[,6]<0.05, "Up", "NDE")
+volc$DE=ifelse(volc[,2]<=-1 & volc[,6]<0.05, "Down", volc$DE)
+volc[,6]=-log10(volc[,6])
+
+## Compare cluster 1 vs 2
+comp="1 vs 2"
+
+## Define DEGs
+de_genes=volc[volc$DE!="NDE","DE",drop=F]
+
+pdf(paste0(output_dir, "/volcano_DEG_plot.pdf"), height=8, width=12)
+  ggplot(volc, aes(x = volc[,2], y = volc[,6], color = DE))+
+  geom_point(size = 3, na.rm = T) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "none")+
+  xlab(paste0("LFC (", comp, ")")) +
+  ylab(expression(-log[10]("FDR"))) +
+  geom_hline(yintercept = -log10(0.01), colour="#990000", linetype="dashed") + geom_vline(xintercept = 1, colour="#990000", linetype="dashed") + geom_vline(xintercept = -1, colour="#990000", linetype="dashed")+
+  scale_color_manual(values = c("blue4", "grey70", "red4")) +
+  scale_y_continuous(trans = "log1p") +
+    annotate(geom="text", x=min(volc[,2])/1.5, y=1.6, label=as.character(sum(volc$DE=="Down")), color="blue4", size=8)+
+  annotate(geom="text", x=max(volc[,2])/1.5, y=1.6, label=as.character(sum(volc$DE=="Up")), color="red4",size=8)
+dev.off()
+
+
+## Calculate z-scores (zsc)
+normalised_deseq2=as.matrix(counts(deseq2object, normaliz=T))
+zsc=(normalised_deseq2-rowMeans(normalised_deseq2))/rowSds(normalised_deseq2)
+
+zsc=zsc[rownames(zsc)%in%rownames(de_genes),]
+
+colors=seq(-3,3,by=0.01)
+my_palette=c("Dark blue",colorRampPalette(colors = c("Dark blue", "white", "red4"))(n = length(colors)-3), "red4")
+
+
+pdf(paste0(output_dir, "/heatmap_DEG.pdf"), height = 6, width=10)
+print(pheatmap(zsc, cluster_cols =  T, cluster_rows=T, breaks=colors,  border_color = "grey50", annotation_row = de_genes, labels_row =  F, treeheight_row=0, cutree_col=2, cutree_rows=2, color=my_palette))
+dev.off()
+
+```
+
+#### Lung Genes Dotplot with CDH
+
+```{r}
+
+d_labelled$full_name <- as.vector(paste0(d_labelled$tissue," ",
+                                                       d_labelled$condition, " ",
+                                                       d_labelled$time,"GA"))
+d_labelled$full_name <- gsub(" H", "", d_labelled$full_name)
+d_labelled$full_name <- gsub(" SB", "", d_labelled$full_name)
+d_labelled$full_name <- gsub("999", "?", d_labelled$full_name)
+d_labelled$full_name <- gsub("NA", "?", d_labelled$full_name)
+
+d_labelled$time <- as.numeric(d_labelled$time)
+
+
+#### Importing lung markers
+lung_marker_list <- read.csv("XXXX", header=TRUE)
+
+lung_marker_list <- lung_marker_list %>% purrr::map_df(rev)
+
+lung_genes <- as.matrix(lung_marker_list[,1])
+
+colnames(lung_marker_list) <- c("hgnc_symbol", "Tissue")
+lung_marker_present <- merge(lung_marker_list,Gene_list_noDuplicates,by=("hgnc_symbol"))
+colnames(lung_marker_present) <- c("Gene", "Tissue", "ENSEMBL", "ENTREZ")
+
+# Select only genes present in the data
+lung_marker_present <- lung_marker_present[(lung_marker_present$ENSEMBL %in% rownames(cpm_batch_correction)),]
+
+data <- as.data.frame(cpm_batch_correction[lung_marker_present$ENSEMBL,])
+colnames(data) <- colnames(cpm_batch_correction)
+
+data$Gene <- lung_marker_present$Gene
+data$GeneFunction <- lung_marker_present$Tissue
+
+rownames(d_labelled) <- d_labelled$unique_samples
+colnames(data) <- c((d_labelled[colnames(data), "full_name"])[c(1:(ncol(data)-2))], "Gene", "GeneFunction")
+formatted_data <- data %>% tidyr::pivot_longer(!c(Gene, GeneFunction), names_to = "Sample", values_to = "Expression")
+
+## Remove zero data from database
+formatted_data[formatted_data$Expression==0,] <- NA
+formatted_data <- formatted_data[complete.cases(formatted_data), ]
+
+## Make expression from 0 - 1 within each genes
+formatted_data <- formatted_data %>% group_by(Gene) %>% mutate(RelExpression = (Expression / max(Expression)))
+
+## For the annotation boxes
+tissues <- as.factor(unique(lung_marker_list$Tissue))
+ymin_string <- 0.5
+lapply(c(1:(length(tissues)-1)), function(x){
+  ymin_string <<- c(ymin_string, (table(lung_marker_list$Tissue)[[tissues[x]]])+ymin_string[x])
+})
+ymax_string <- (table(lung_marker_list$Tissue)[[tissues[1]]]+0.5)
+lapply(c(2:length(tissues)), function(y){
+  ymax_string <<- c(ymax_string, (table(lung_marker_list$Tissue)[[tissues[y]]])+ymax_string[y-1])
+})
+    
+pdf((paste0(working_dir, "/dotplots/Dotplot LAFO CDH.pdf")),
+    width=15, 
+    height=13)
+
+plot <- ggplot(formatted_data, aes(x = Sample, y = Gene)) +
+ geom_point(aes(colour = RelExpression, size=log(Expression))) +
+  scale_size(limits = c(0,NA),
+             range = c(1,6), name="log(CPM)",
+             breaks=c(0,2,4,8,12)) +
+  scale_color_gradient2(mid = "#edb4b4", high="#590101", name="Relative \nExpression", limits=c(0, 1), breaks=c(0, 0.5, 1)) +
+ scale_y_discrete(limits = factor(lung_genes)) +
+ scale_x_discrete(limits = lung_samples_ordered$full_name) +
+  coord_cartesian(clip="off") +
+  labs(y = NULL, x = NULL, title = NULL)  +
+  theme_light(
+    base_family = "sans",
+    
+    base_line_size = 0.4,
+    base_rect_size = 0.1,
+    base_size = 25
+     ) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+          legend.position='left', 
+          legend.justification='bottom',
+          legend.direction='vertical',
+          axis.text.y = element_text(face = "italic")) +
+    annotate(
+      xmin = length(unique(lung_samples_ordered$full_name))+0.6, 
+      xmax = length(unique(lung_samples_ordered$full_name))+1.1,
+      ymin = ymin_string, 
+      ymax = ymax_string,
+      geom = "rect",
+      fill = rep(c("gray20", "gray55"), 20)[c(1:length(unique(lung_marker_list$Tissue)))]
+             )
+print(plot)
+dev.off()
+
+```
+
+#### All surfactant genes heatmap
+
+```{r}
+surf_pjsamples_outlier <- pjsamples_outlier
+
+rownames(surf_pjsamples_outlier) <- surf_pjsamples_outlier$tissue
+
+surf_pjsamples_outlier <- surf_pjsamples_outlier[surf_pjsamples_outlier$FETO != "None",]
+surf_pjsamples_outlier <- surf_pjsamples_outlier[surf_pjsamples_outlier$FETO != "Unknown",]
+
+surf_pjsamples_outlier <- surf_pjsamples_outlier[surf_pjsamples_outlier$organ=="Lung",]
+surf_pjsamples_outlier <- surf_pjsamples_outlier[!is.na(surf_pjsamples_outlier$name),]
+complete_matrix_outlier_batch_filtered <- complete_matrix_outlier_batch_adjusted[,surf_pjsamples_outlier$unique_samples]
+cpm_batch_correction_filt <- cpm(complete_matrix_outlier_batch_filtered)
+
+genes=c("SFTPA1", "SFTPA2", "SFTPB", "SFTPC", "SFTPD")
+
+surf_marker_list=as.data.frame(genes)
+colnames(surf_marker_list) <- c("hgnc_symbol")
+surf_marker_present <- merge(surf_marker_list,Gene_list_noDuplicates,by=("hgnc_symbol"))
+colnames(surf_marker_present) <- c("Gene","ENSEMBL")
+
+# Select only genes present in the data
+surf_marker_present <- surf_marker_present[(surf_marker_present$ENSEMBL %in% rownames(cpm_batch_correction_filt)),]
+
+data <- as.data.frame(cpm_batch_correction_filt[surf_marker_present$ENSEMBL,])
+colnames(data) <- colnames(cpm_batch_correction_filt)
+
+data$Gene <- surf_marker_present$Gene
+
+data_Zscore <- data
+data_Zscore <- data_Zscore[surf_marker_present$ENSEMBL,c(1:(length(colnames(data_Zscore))-2))]
+
+## Calculate mean and SD of log(expression) for each gene
+data_Zscore[data_Zscore==-Inf] <- 0
+data_Zscore <- as.data.frame(data_Zscore)
+data_Zscore <- data_Zscore[,surf_pjsamples_outlier[surf_pjsamples_outlier$condition=="H","unique_samples"]]
+data_Zscore$mean <- (rowSums(data_Zscore))/length(colnames(data_Zscore))
+data_Zscore$sd <- rowSds(data_Zscore)
+## Zscore = (log(expression) - mean) / SD
+
+data_Zscore$Gene <- data$Gene
+data_Zscore$condition <- data$condition
+
+
+
+formatted_data <- data %>% tidyr::pivot_longer(!c(Gene), names_to = "Sample", values_to = "Expression")
+
+rownames(pjsamples_outlier) = pjsamples_outlier$unique_samples
+samples = pjsamples_outlier[colnames(cpm_batch_correction_filt),]
+samples = samples[colnames(data),"condition"]
+samples = samples[!is.na(samples)]
+formatted_data$condition = rep(as.vector(samples), length(genes))
+
+
+
+lapply(c(1:length(data$Gene)), function(u){
+  gene_name=surf_marker_present$Gene[u]
+
+  formatted_data[formatted_data$Gene==gene_name,"Zscore"] <<-
+    (formatted_data[formatted_data$Gene==gene_name,"Expression"] -
+     data_Zscore[data_Zscore$Gene==gene_name, "mean"]) /
+    data_Zscore[data_Zscore$Gene==gene_name, "sd"]
+})
+
+healthy = surf_pjsamples_outlier[surf_pjsamples_outlier$condition=="H",]
+healthy <- healthy[order(healthy$time, decreasing=FALSE),]
+CDH_AF = surf_pjsamples_outlier[surf_pjsamples_outlier$condition=="CDH_AF",]
+CDH_AF <- CDH_AF[order(CDH_AF$time, decreasing=FALSE),]
+CDH_TF = surf_pjsamples_outlier[surf_pjsamples_outlier$condition=="CDH_TF",]
+CDH_TF <- CDH_TF[order(CDH_TF$time, decreasing=FALSE),]
+
+surf_pjsamples_outlier <- rbind(healthy[order(healthy$FETO, decreasing=TRUE),],
+                           CDH_AF[order(CDH_AF$FETO, decreasing=TRUE),],
+                           CDH_TF[order(CDH_TF$FETO, decreasing=TRUE),])
+# surf_pjsamples_outlier <- surf_pjsamples_outlier[surf_pjsamples_outlier$Differentiated=="N",]
+
+formatted_data$logZscore <- log(formatted_data$Zscore)
+formatted_data$logExpression <- log(formatted_data$Expression)
+formatted_data[formatted_data==-Inf] <- 0
+formatted_data[is.na(formatted_data)] <- 0
+
+pdf(paste0(output_dir, "/../CDH_heatmap_SURFonly_CPM_ZScore_inclDiff.pdf"), height = 3, width=12)
+ggplot() + geom_tile(data=formatted_data, aes(x=as.character(Sample), y=Gene, fill=Zscore),
+                     color="black") +
+  scale_fill_gradient2(low="gray90", mid = "gray90", high="#590101", name="Zscore", breaks=c(-3,0,3,10), midpoint=0) +
+ scale_x_discrete(limits = as.factor(surf_pjsamples_outlier$unique_samples)) +
+  labs(
+                 y = NULL,
+                 x = NULL,
+                 title = NULL
+                          )  +
+  theme_light(
+    base_family = "sans",
+    base_line_size = 0.4,
+    base_rect_size = 0.1,
+    base_size = 14
+     ) +
+  theme(axis.text.x = element_text(angle = 90))
+dev.off()
+
+```
+
+
+
